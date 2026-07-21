@@ -467,7 +467,7 @@ class DownloadsOrganizer:
         message = f"{target_path.name} moved to {category}"
 
         try:
-            terminal_notifier = shutil.which("terminal-notifier")
+            terminal_notifier = self.terminal_notifier_path()
             if terminal_notifier:
                 subprocess.run(
                     [
@@ -503,6 +503,17 @@ class DownloadsOrganizer:
             )
         except Exception as exc:  # noqa: BLE001 - notifications should never block organization
             self.logger.debug("Notification failed for %s: %s", target_path, exc)
+
+    @staticmethod
+    def terminal_notifier_path() -> str | None:
+        for candidate in (
+            shutil.which("terminal-notifier"),
+            "/opt/homebrew/bin/terminal-notifier",
+            "/usr/local/bin/terminal-notifier",
+        ):
+            if candidate and Path(candidate).exists():
+                return str(candidate)
+        return None
 
     @staticmethod
     def applescript_quote(value: str) -> str:
