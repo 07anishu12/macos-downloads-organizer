@@ -14,13 +14,11 @@ import hashlib
 import logging
 import mimetypes
 import os
-import plistlib
 import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -31,20 +29,19 @@ LOG_FILENAME = "organization_log.txt"
 
 
 FOLDER_STRUCTURE: tuple[str, ...] = (
-    "Images",
-    "Images/Screenshots",
-    "Images/Photos",
-    "Images/Wallpapers",
-    "Images/Logos",
-    "Videos",
-    "Audio",
-    "PDFs",
+    "Media",
+    "Media/Screenshots",
+    "Media/Images",
+    "Media/Videos",
+    "Media/Movies",
+    "Media/Audio",
     "Documents",
     "Documents/Word",
     "Documents/Excel",
+    "Documents/CSV",
     "Documents/PowerPoint",
+    "Documents/PDFs",
     "Documents/Text",
-    "HTML",
     "Code",
     "Code/Python",
     "Code/JavaScript",
@@ -57,41 +54,42 @@ FOLDER_STRUCTURE: tuple[str, ...] = (
     "Applications",
     "Installers",
     "DMG",
-    "Fonts",
     "Torrents",
-    "AI",
-    "Design",
-    "Work",
-    "Personal",
-    "Resume",
     "Finance",
-    "Research",
+    "Resume",
     "Misc",
     "Duplicate Files",
 )
 
-MANAGED_ROOTS = {part.split("/")[0] for part in FOLDER_STRUCTURE}
+LEGACY_MANAGED_ROOTS = {
+    "Images",
+    "Videos",
+    "Audio",
+    "PDFs",
+    "HTML",
+    "Fonts",
+    "AI",
+    "Design",
+    "Work",
+    "Personal",
+    "Research",
+}
+CURRENT_MANAGED_ROOTS = {part.split("/")[0] for part in FOLDER_STRUCTURE}
 
 
 KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("resume", "cv", "curriculum vitae"), "Resume"),
     (("invoice", "receipt", "reciept", "salary", "payslip", "bank", "tax"), "Finance"),
-    (("research", "paper", "dataset", "model", "experiment"), "Research"),
-    (("proposal", "presentation", "ppt", "pitch", "job", "application", "interview", "offer"), "Work"),
-    (("chatgpt", "openai", "claude", "gemini", "llm", "ai-", "_ai", "stable diffusion", "midjourney"), "AI"),
-    (("figma", "sketch", "adobe", "photoshop", "illustrator", "xd", "design", "mockup", "wireframe"), "Design"),
-    (("personal", "family", "medical", "health", "passport", "aadhaar", "pan card"), "Personal"),
 )
 
 SCREENSHOT_PATTERNS = (
     "screenshot",
     "screen shot",
+    "screencapture",
+    "screen capture",
     "chatgpt image",
     "whatsapp image",
 )
-
-WALLPAPER_PATTERNS = ("wallpaper", "background", "desktop")
-LOGO_PATTERNS = ("logo", "brandmark", "icon")
 
 CODE_EXTENSIONS = {
     ".py": "Code/Python",
@@ -117,13 +115,13 @@ CODE_EXTENSIONS = {
 }
 
 DOCUMENT_EXTENSIONS = {
-    ".pdf": "PDFs",
+    ".pdf": "Documents/PDFs",
     ".doc": "Documents/Word",
     ".docx": "Documents/Word",
     ".odt": "Documents/Word",
     ".xls": "Documents/Excel",
     ".xlsx": "Documents/Excel",
-    ".csv": "Documents/Excel",
+    ".csv": "Documents/CSV",
     ".ppt": "Documents/PowerPoint",
     ".pptx": "Documents/PowerPoint",
     ".key": "Documents/PowerPoint",
@@ -145,8 +143,8 @@ ARCHIVE_EXTENSIONS = {
 }
 
 APPLICATION_EXTENSIONS = {".app": "Applications", ".pkg": "Installers", ".mpkg": "Installers", ".iso": "Applications", ".dmg": "DMG"}
-FONT_EXTENSIONS = {".ttf", ".otf", ".woff", ".woff2", ".eot"}
 TORRENT_EXTENSIONS = {".torrent"}
+MOVIE_MIN_SECONDS = 20 * 60
 
 
 @dataclass(frozen=True)
@@ -158,10 +156,19 @@ class FileDecision:
 
 
 class DownloadsOrganizer:
-    def __init__(self, downloads_dir: Path, dry_run: bool = False, verbose: bool = False) -> None:
+    def __init__(
+        self,
+        downloads_dir: Path,
+        dry_run: bool = False,
+        verbose: bool = False,
+        migrate_legacy: bool = False,
+        notify: bool = False,
+    ) -> None:
         self.downloads_dir = downloads_dir.expanduser().resolve()
         self.dry_run = dry_run
         self.verbose = verbose
+        self.migrate_legacy = migrate_legacy
+        self.notify = notify
         self.log_file = self.downloads_dir / LOG_FILENAME
         self.logger = self._build_logger()
 
@@ -255,7 +262,14 @@ class DownloadsOrganizer:
             relative = path.relative_to(self.downloads_dir)
         except ValueError:
             return False
-        return bool(relative.parts) and relative.parts[0] in MANAGED_ROOTS
+        if not relative.parts:
+            return False
+        root = relative.parts[0]
+        if root in CURRENT_MANAGED_ROOTS:
+            return True
+        if root in LEGACY_MANAGED_ROOTS:
+            return not self.migrate_legacy
+        return False
 
     @staticmethod
     def is_partial_download(path: Path) -> bool:
@@ -303,18 +317,13 @@ class DownloadsOrganizer:
         metadata = self.metadata_kind(path)
         if self.looks_like_image(mime, suffix, metadata):
             if any(pattern in name for pattern in SCREENSHOT_PATTERNS):
-                return "Images/Screenshots"
-            if any(pattern in name for pattern in WALLPAPER_PATTERNS):
-                return "Images/Wallpapers"
-            if any(pattern in name for pattern in LOGO_PATTERNS):
-                return "Images/Logos"
+                return "Media/Screenshots"
+            return "Media/Images"
 
         if suffix in APPLICATION_EXTENSIONS:
             return APPLICATION_EXTENSIONS[suffix]
         if suffix in ARCHIVE_EXTENSIONS or "archive" in (mime or ""):
             return "Archives"
-        if suffix in FONT_EXTENSIONS or (mime or "").startswith("font/"):
-            return "Fonts"
         if suffix in TORRENT_EXTENSIONS or mime == "application/x-bittorrent":
             return "Torrents"
 
@@ -322,21 +331,20 @@ class DownloadsOrganizer:
         if keyword_destination:
             return keyword_destination
 
-        if self.looks_like_image(mime, suffix, metadata):
-            return "Images/Photos"
-
         if self.looks_like_video(mime, suffix):
-            return "Videos"
+            if self.video_duration_seconds(path) >= MOVIE_MIN_SECONDS:
+                return "Media/Movies"
+            return "Media/Videos"
         if self.looks_like_audio(mime, suffix):
-            return "Audio"
+            return "Media/Audio"
         if suffix in DOCUMENT_EXTENSIONS:
             return DOCUMENT_EXTENSIONS[suffix]
         if suffix in CODE_EXTENSIONS:
             return CODE_EXTENSIONS[suffix]
         if mime == "text/html":
-            return "HTML"
+            return "Code/HTML"
         if mime == "application/pdf":
-            return "PDFs"
+            return "Documents/PDFs"
 
         return "Misc"
 
@@ -365,6 +373,23 @@ class DownloadsOrganizer:
     def looks_like_audio(mime: str | None, suffix: str) -> bool:
         audio_exts = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".aiff"}
         return (mime or "").startswith("audio/") or suffix in audio_exts
+
+    @staticmethod
+    def video_duration_seconds(path: Path) -> float:
+        try:
+            result = subprocess.run(
+                ["mdls", "-name", "kMDItemDurationSeconds", "-raw", str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            value = result.stdout.strip()
+            if result.returncode == 0 and value and value != "(null)":
+                return float(value)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return 0.0
+        return 0.0
 
     @staticmethod
     def sha256(path: Path) -> str:
@@ -430,6 +455,59 @@ class DownloadsOrganizer:
             self.logger.info("DUPLICATE moved: %s -> %s duplicate_of=%s", source, target_path, decision.duplicate_of)
         else:
             self.logger.info("MOVED: %s -> %s (%s)", source, target_path, decision.reason)
+        self.send_move_notification(target_path, decision)
+
+    def send_move_notification(self, target_path: Path, decision: FileDecision) -> None:
+        if not self.notify:
+            return
+
+        folder = target_path.parent
+        category = folder.relative_to(self.downloads_dir) if folder.is_relative_to(self.downloads_dir) else folder
+        title = "Downloads Organizer"
+        message = f"{target_path.name} moved to {category}"
+
+        try:
+            terminal_notifier = shutil.which("terminal-notifier")
+            if terminal_notifier:
+                subprocess.run(
+                    [
+                        terminal_notifier,
+                        "-title",
+                        title,
+                        "-message",
+                        message,
+                        "-open",
+                        str(folder),
+                        "-group",
+                        f"{APP_NAME}-{target_path.name}",
+                    ],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+                return
+
+            script = (
+                'display notification '
+                f'{self.applescript_quote(message)} '
+                'with title '
+                f'{self.applescript_quote(title)}'
+            )
+            subprocess.run(
+                ["osascript", "-e", script],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception as exc:  # noqa: BLE001 - notifications should never block organization
+            self.logger.debug("Notification failed for %s: %s", target_path, exc)
+
+    @staticmethod
+    def applescript_quote(value: str) -> str:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
 
     @staticmethod
     def unique_destination(path: Path) -> Path:
@@ -446,7 +524,7 @@ class DownloadsOrganizer:
             counter += 1
 
     def configure_screenshots(self) -> None:
-        screenshot_dir = self.downloads_dir / "Images" / "Screenshots"
+        screenshot_dir = self.downloads_dir / "Media" / "Screenshots"
         if self.dry_run:
             self.logger.info("DRY RUN configure screenshots to %s", screenshot_dir)
             return
@@ -464,7 +542,7 @@ class DownloadsOrganizer:
 
     def move_desktop_screenshots(self) -> None:
         desktop = Path.home() / "Desktop"
-        destination = self.downloads_dir / "Images" / "Screenshots"
+        destination = self.downloads_dir / "Media" / "Screenshots"
         if not desktop.exists():
             self.logger.info("SKIPPED Desktop screenshot move: Desktop does not exist")
             return
@@ -486,27 +564,6 @@ class DownloadsOrganizer:
                 self.logger.info("MOVED Desktop screenshot: %s -> %s", path, target)
 
 
-def write_launch_agent_template(path: Path, python_path: Path, script_path: Path, downloads_dir: Path) -> None:
-    launch_log_dir = Path.home() / "Library" / "Logs" / APP_NAME
-    plist = {
-        "Label": PLIST_LABEL,
-        "ProgramArguments": [
-            str(python_path),
-            str(script_path),
-            "--downloads-dir",
-            str(downloads_dir),
-            "--verbose",
-        ],
-        "RunAtLoad": True,
-        "StartInterval": 30,
-        "WatchPaths": [str(downloads_dir)],
-        "StandardOutPath": str(launch_log_dir / "downloads_organizer.out.log"),
-        "StandardErrorPath": str(launch_log_dir / "downloads_organizer.err.log"),
-    }
-    with path.open("wb") as file_obj:
-        plistlib.dump(plist, file_obj, sort_keys=False)
-
-
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Organize ~/Downloads safely and automatically.")
     parser.add_argument("--downloads-dir", type=Path, default=Path.home() / "Downloads")
@@ -514,12 +571,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
     parser.add_argument("--configure-screenshots", action="store_true", help="Set macOS screenshot destination.")
     parser.add_argument("--move-desktop-screenshots", action="store_true", help="Move existing Desktop screenshots.")
+    parser.add_argument(
+        "--migrate-legacy",
+        action="store_true",
+        help="Also reorganize files from old organizer folders such as Images, PDFs, Work, AI, Fonts, and Resume.",
+    )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Show a macOS notification for each moved file. If terminal-notifier is installed, clicking opens the folder.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    organizer = DownloadsOrganizer(args.downloads_dir, dry_run=args.dry_run, verbose=args.verbose)
+    organizer = DownloadsOrganizer(
+        args.downloads_dir,
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        migrate_legacy=args.migrate_legacy,
+        notify=args.notify,
+    )
 
     try:
         organizer.organize()

@@ -30,6 +30,7 @@ chmod 755 "${INSTALL_DIR}/organize_downloads.py"
   --downloads-dir "${DOWNLOADS_DIR}" \
   --configure-screenshots \
   --move-desktop-screenshots \
+  --migrate-legacy \
   --verbose
 
 cat > "${PLIST_PATH}" <<PLIST
@@ -46,6 +47,7 @@ cat > "${PLIST_PATH}" <<PLIST
     <string>--downloads-dir</string>
     <string>${DOWNLOADS_DIR}</string>
     <string>--verbose</string>
+    <string>--notify</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -55,6 +57,8 @@ cat > "${PLIST_PATH}" <<PLIST
   <array>
     <string>${DOWNLOADS_DIR}</string>
   </array>
+  <key>ProcessType</key>
+  <string>Background</string>
   <key>StandardOutPath</key>
   <string>${LAUNCH_LOG_DIR}/downloads_organizer.out.log</string>
   <key>StandardErrorPath</key>
@@ -73,3 +77,8 @@ echo "LaunchAgent: ${PLIST_PATH}"
 echo "Log file: ${DOWNLOADS_DIR}/organization_log.txt"
 echo "LaunchAgent logs: ${LAUNCH_LOG_DIR}"
 echo "Screenshot location: $(defaults read com.apple.screencapture location)"
+if command -v terminal-notifier >/dev/null 2>&1; then
+  echo "Move notifications are clickable and will open the destination folder."
+else
+  echo "Move notifications are enabled. Install terminal-notifier for click-to-open-folder support."
+fi
